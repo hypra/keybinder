@@ -29,6 +29,7 @@
 G_BEGIN_DECLS
 
 typedef void (* KeybinderHandler) (const char *keystring, void *user_data);
+typedef void (* KeybinderHandler2) (const char *keystring, gboolean pressed, void *user_data);
 
 void keybinder_init (void);
 
@@ -38,14 +39,27 @@ gboolean keybinder_bind (const char *keystring,
                          KeybinderHandler  handler,
                          void *user_data);
 
+gboolean keybinder_bind2 (const char *keystring,
+                          KeybinderHandler2 handler,
+                          void *user_data);
+
 gboolean
 keybinder_bind_full (const char *keystring,
                      KeybinderHandler handler,
                      void *user_data,
                      GDestroyNotify notify);
 
+gboolean
+keybinder_bind2_full (const char *keystring,
+                      KeybinderHandler2 handler,
+                      void *user_data,
+                      GDestroyNotify notify);
+
 void keybinder_unbind (const char *keystring,
                        KeybinderHandler  handler);
+
+void keybinder_unbind2 (const char *keystring,
+                        KeybinderHandler2 handler);
 
 void keybinder_unbind_all (const char *keystring);
 

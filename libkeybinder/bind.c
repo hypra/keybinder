@@ -61,12 +61,15 @@
 
 struct Binding {
 	KeybinderHandler      handler;
+	KeybinderHandler2     handler2;
 	void                 *user_data;
 	char                 *keystring;
 	GDestroyNotify        notify;
 	/* GDK "distilled" values */
 	guint                 keyval;
 	GdkModifierType       modifiers;
+	/* pressed state */
+	gboolean              pressed;
 };
 
 static GSList *bindings = NULL;
@@ -422,8 +425,26 @@ filter_func (GdkXEvent *gdk_xevent, GdkEvent *event, gpointer data)
 				TRACE (g_print ("Calling handler for '%s'...\n", 
 						binding->keystring));
 
-				(binding->handler) (binding->keystring, 
-						    binding->user_data);
+				if (binding->handler2)
+				{
+					if (! binding->pressed)
+					{
+						binding->pressed = TRUE;
+						(binding->handler2) (binding->keystring,
+								     binding->pressed,
+								     binding->user_data);
+					}
+				}
+				else
+					(binding->handler) (binding->keystring,
+							    binding->user_data);
+			} else if (binding->pressed && binding->handler2) {
+				/* If we have any pressed binding that don't
+				 * match, release it */
+				binding->pressed = FALSE;
+				(binding->handler2) (binding->keystring,
+						     binding->pressed,
+						     binding->user_data);
 			}
 		}
 
@@ -431,6 +452,31 @@ filter_func (GdkXEvent *gdk_xevent, GdkEvent *event, gpointer data)
 		break;
 	case KeyRelease:
 		TRACE (g_print ("Got KeyRelease! \n"));
+
+		processing_event = TRUE;
+		last_event_time = xevent->xkey.time;
+
+		/* If we have any pressed bindings, release them.  It doesn't
+		 * matter what the binding and key actually are, as bindings
+		 * ought to either not be pressed, or a release would alter
+		 * them anyway. */
+		iter = bindings;
+		while (iter != NULL) {
+			/* NOTE: ``iter`` might be removed from the list
+			 * in the callback.
+			 */
+			struct Binding *binding = iter->data;
+			iter = iter->next;
+
+			if (binding->pressed && binding->handler2) {
+				binding->pressed = FALSE;
+				(binding->handler2) (binding->keystring,
+						     binding->pressed,
+						     binding->user_data);
+			}
+		}
+
+		processing_event = FALSE;
 		break;
 	}
 
@@ -537,6 +583,39 @@ keybinder_set_use_cooked_accelerators (gboolean use_cooked)
 	use_xkb_extension = use_cooked && detected_xkb_extension;
 }
 
+static gboolean
+keybinder_bind_internal (const char *keystring,
+                         KeybinderHandler handler,
+                         KeybinderHandler2 handler2,
+                         void *user_data,
+                         GDestroyNotify notify)
+{
+	struct Binding *binding;
+	gboolean success;
+
+	g_return_val_if_fail (handler == NULL || handler2 == NULL, FALSE);
+
+	binding = g_new0 (struct Binding, 1);
+	binding->keystring = g_strdup (keystring);
+	binding->handler = handler;
+	binding->handler2 = handler2;
+	binding->user_data = user_data;
+	binding->notify = notify;
+	/* This is slightly wrong in case we bind while the key is pressed */
+	binding->pressed = FALSE;
+
+	/* Sets the binding's keycode and modifiers */
+	success = do_grab_key (binding);
+
+	if (success) {
+		bindings = g_slist_prepend (bindings, binding);
+	} else {
+		g_free (binding->keystring);
+		g_free (binding);
+	}
+	return success;
+}
+
 /**
  * keybinder_bind: (skip)
  * @keystring: an accelerator description (gtk_accelerator_parse() format)
@@ -556,7 +635,31 @@ keybinder_bind (const char *keystring,
                 KeybinderHandler handler,
                 void *user_data)
 {
-	return keybinder_bind_full(keystring, handler, user_data, NULL);
+	return keybinder_bind_internal(keystring, handler, NULL, user_data, NULL);
+}
+
+/**
+ * keybinder_bind2: (skip)
+ * @keystring: an accelerator description (gtk_accelerator_parse() format)
+ * @handler:   callback function
+ * @user_data: data to pass to @handler
+ *
+ * Grab a key combination globally and register a callback to be called when
+ * the key combination is pressed or released.
+ *
+ * This function is excluded from introspected bindings and is replaced by
+ * keybinder_bind2_full.
+ *
+ * Since: 0.3.3
+ *
+ * Returns: %TRUE if the accelerator could be grabbed
+ */
+gboolean
+keybinder_bind2 (const char *keystring,
+                 KeybinderHandler2 handler,
+                 void *user_data)
+{
+	return keybinder_bind_internal(keystring, NULL, handler, user_data, NULL);
 }
 
 /**
@@ -579,25 +682,58 @@ keybinder_bind_full (const char *keystring,
                      void *user_data,
                      GDestroyNotify notify)
 {
-	struct Binding *binding;
-	gboolean success;
+	return keybinder_bind_internal(keystring, handler, NULL, user_data, notify);
+}
 
-	binding = g_new0 (struct Binding, 1);
-	binding->keystring = g_strdup (keystring);
-	binding->handler = handler;
-	binding->user_data = user_data;
-	binding->notify = notify;
+/**
+ * keybinder_bind2_full: (rename-to keybinder_bind2)
+ * @keystring: an accelerator description (gtk_accelerator_parse() format)
+ * @handler:   (scope notified):        callback function
+ * @user_data: (closure) (allow-none):  data to pass to @handler
+ * @notify:    (allow-none):  called when @handler is unregistered
+ *
+ * Grab a key combination globally and register a callback to be called when
+ * the key combination is pressed or released.
+ *
+ * Since: 0.3.3
+ *
+ * Returns: %TRUE if the accelerator could be grabbed
+ */
+gboolean
+keybinder_bind2_full (const char *keystring,
+                      KeybinderHandler2 handler,
+                      void *user_data,
+                      GDestroyNotify notify)
+{
+	return keybinder_bind_internal(keystring, NULL, handler, user_data, notify);
+}
 
-	/* Sets the binding's keycode and modifiers */
-	success = do_grab_key (binding);
+static void
+keybinder_unbind_internal (const char *keystring,
+                           KeybinderHandler handler,
+                           KeybinderHandler2 handler2)
+{
+	GSList *iter;
 
-	if (success) {
-		bindings = g_slist_prepend (bindings, binding);
-	} else {
+	for (iter = bindings; iter != NULL; iter = iter->next) {
+		struct Binding *binding = iter->data;
+
+		if (strcmp (keystring, binding->keystring) != 0 ||
+		    (handler && handler != binding->handler) ||
+		    (handler2 && handler2 != binding->handler2))
+			continue;
+
+		do_ungrab_key (binding);
+		bindings = g_slist_remove (bindings, binding);
+
+		TRACE (g_print("unbind, notify: %p\n", binding->notify));
+		if (binding->notify) {
+			binding->notify(binding->user_data);
+		}
 		g_free (binding->keystring);
 		g_free (binding);
+		break;
 	}
-	return success;
 }
 
 /**
@@ -616,26 +752,28 @@ keybinder_bind_full (const char *keystring,
 void
 keybinder_unbind (const char *keystring, KeybinderHandler handler)
 {
-	GSList *iter;
+	keybinder_unbind_internal (keystring, handler, NULL);
+}
 
-	for (iter = bindings; iter != NULL; iter = iter->next) {
-		struct Binding *binding = iter->data;
-
-		if (strcmp (keystring, binding->keystring) != 0 ||
-		    handler != binding->handler) 
-			continue;
-
-		do_ungrab_key (binding);
-		bindings = g_slist_remove (bindings, binding);
-
-		TRACE (g_print("unbind, notify: %p\n", binding->notify));
-		if (binding->notify) {
-			binding->notify(binding->user_data);
-		}
-		g_free (binding->keystring);
-		g_free (binding);
-		break;
-	}
+/**
+ * keybinder_unbind2: (skip)
+ * @keystring: an accelerator description (gtk_accelerator_parse() format)
+ * @handler:   callback function
+ *
+ * Unregister a previously bound callback for this keystring.
+ *
+ * NOTE: multiple callbacks per keystring are not properly supported. You
+ * might as well use keybinder_unbind_all().
+ *
+ * This function is excluded from introspected bindings and is replaced by
+ * keybinder_unbind_all().
+ *
+ * Since: 0.3.3
+ */
+void
+keybinder_unbind2 (const char *keystring, KeybinderHandler2 handler)
+{
+	keybinder_unbind_internal (keystring, NULL, handler);
 }
 
 /**
